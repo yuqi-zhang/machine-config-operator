@@ -136,17 +136,26 @@ func NewClusterDrivenDaemon(
 		glog.Fatalf("error creating clients: %v", err)
 	}
 
-	ctx := common.CreateControllerContext(cb, stopCh, componentName)
-
-	ctx.KubeInformerFactory.Start(ctx.Stop)
-	close(ctx.KubeInformersStarted)
-
 	dn.kubeClient = cb.KubeClientOrDie(componentName)
 	dn.client = cb.MachineConfigClientOrDie(componentName)
 
 	if err = loadNodeAnnotations(dn.kubeClient.CoreV1().Nodes(), nodeName); err != nil {
 		return nil, err
 	}
+	return dn, nil
+}
+
+// StartInformer initializes and starts the informers.
+func (dn *Daemon) StartInformer(stopCh chan (struct{}), nodeName, componentName, kubeconfig string) error {
+	cb, err := common.NewClientBuilder(kubeconfig)
+	if err != nil {
+		return err
+	}
+
+	ctx := common.CreateControllerContext(cb, stopCh, componentName)
+
+	ctx.KubeInformerFactory.Start(ctx.Stop)
+	close(ctx.KubeInformersStarted)
 
 	nodeInformer := ctx.KubeInformerFactory.Core().V1().Nodes()
 	nodeInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -155,8 +164,7 @@ func NewClusterDrivenDaemon(
 
 	dn.nodeLister = nodeInformer.Lister()
 	dn.nodeListerSynced = nodeInformer.Informer().HasSynced
-
-	return dn, nil
+	return nil
 }
 
 // Run finishes informer setup and then blocks, and the informer will be
