@@ -55,7 +55,7 @@ func TestFeaturesDefault(t *testing.T) {
 			f.featLister = append(f.featLister, features)
 
 			f.expectGetMachineConfigAction(mcs)
-			f.expectGetMachineConfigAction(mcs2)
+			f.expectCreateMachineConfigAction(mcs2)
 
 			f.runFeature(getKeyFromFeatureGate(features, t))
 		})
