@@ -2,10 +2,13 @@ package render
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"time"
 
+	ign "github.com/coreos/ignition/config/v2_2"
+	igntypes "github.com/coreos/ignition/config/v2_2/types"
 	"github.com/golang/glog"
 	"github.com/openshift/machine-config-operator/lib/resourceapply"
 	mcfgv1 "github.com/openshift/machine-config-operator/pkg/apis/machineconfiguration.openshift.io/v1"
@@ -530,10 +533,13 @@ func generateRenderedMachineConfig(pool *mcfgv1.MachineConfigPool, configs []*mc
 			return nil, err
 		}
 	}
+
 	merged, err := ctrlcommon.MergeMachineConfigs(configs, cconfig.Spec.OSImageURL)
 	if err != nil {
 		return nil, err
 	}
+	removeIgnDuplicateFiles(merged)
+
 	hashedName, err := getMachineConfigHashedName(pool, merged)
 	if err != nil {
 		return nil, err
@@ -548,6 +554,50 @@ func generateRenderedMachineConfig(pool *mcfgv1.MachineConfigPool, configs []*mc
 	merged.Annotations[ctrlcommon.GeneratedByControllerVersionAnnotationKey] = version.Hash
 
 	return merged, nil
+}
+
+// removeIgnDuplicateFiles removes duplicate entries in storage.files section of the given
+// ignition config, if both the filesystem and path match. This does not change existing
+// behaviour, since for existing scenarios, earlier duplicate entries are simply overwritten
+// by later ones. This removal eases transition to ignition spec 3 where duplicates are no
+// longer allowed.
+func removeIgnDuplicateFiles(config *mcfgv1.MachineConfig) {
+	ignConfig, report, err := ign.Parse(config.Spec.Config.Raw)
+	if err != nil {
+		glog.Errorf("Failed to parse Ignition during duplicate removal: %s\nReport: %v", err, report)
+		return
+	}
+
+	files := ignConfig.Storage.Files
+	if files == nil {
+		return
+	}
+
+	// traverse the items in reverse and build a new Ign section
+	fileLen := len(files)
+	filePathMap := map[string]string{}
+	var outFiles []igntypes.File
+	for i := fileLen - 1; i >= 0; i-- {
+		// We do not actually support to other filesystems so we make the assumption that there is only 1 here
+		path := files[i].Path
+		name := fmt.Sprintf("File: %s", path)
+		if duplicate, isDup := filePathMap[path]; isDup {
+			glog.Infof("Found duplicate: %v, older file will not be rendered.", duplicate)
+			continue
+		}
+
+		outFiles = append(outFiles, files[i])
+		filePathMap[path] = name
+	}
+
+	// outFiles should now have all duplication removed
+	ignConfig.Storage.Files = outFiles
+	outIgn, err := json.Marshal(ignConfig)
+	if err != nil {
+		glog.Errorf("Error during duplicate file removal from Ignition config: error attempting to marshal: %v", err)
+		return
+	}
+	config.Spec.Config.Raw = outIgn
 }
 
 // RunBootstrap runs the render controller in bootstrap mode.
