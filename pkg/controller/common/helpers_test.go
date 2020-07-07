@@ -88,7 +88,7 @@ func TestConvertIgnition3to2(t *testing.T) {
 	require.Nil(t, isValid2)
 }
 
-func TestIgnParseWrapper(t *testing.T) {
+func TestParseAndConvert(t *testing.T) {
 	// Make a new Ign3.1 config
 	testIgn3Config := ign3types.Config{}
 	tempUser := ign3types.PasswdUser{Name: "core", SSHAuthorizedKeys: []ign3types.SSHAuthorizedKey{"5678", "abc"}}
@@ -96,38 +96,49 @@ func TestIgnParseWrapper(t *testing.T) {
 	testIgn3Config.Ignition.Version = "3.1.0"
 
 	// Make a Ign2 comp config
-	testIgn2Config := NewIgnConfig()
+	testIgn2Config := ign2types.Config{}
 	tempUser2 := ign2types.PasswdUser{Name: "core", SSHAuthorizedKeys: []ign2types.SSHAuthorizedKey{"5678", "abc"}}
 	testIgn2Config.Passwd.Users = []ign2types.PasswdUser{tempUser2}
+	testIgn2Config.Ignition.Version = "2.2.0"
 
 	// turn v2.2 config into a raw []byte
 	rawIgn := helpers.MarshalOrDie(testIgn2Config)
 	// check that it was parsed successfully
-	convertedIgn, err := IgnParseWrapper(rawIgn)
+	convertedIgn, err := ParseAndConvertConfig(rawIgn)
 	require.Nil(t, err)
-	assert.Equal(t, testIgn2Config, convertedIgn)
+	assert.Equal(t, testIgn3Config, convertedIgn)
 
 	// turn v3.1 config into a raw []byte
 	rawIgn = helpers.MarshalOrDie(testIgn3Config)
 	// check that it was parsed successfully
-	convertedIgn, err = IgnParseWrapper(rawIgn)
+	convertedIgn, err = ParseAndConvertConfig(rawIgn)
 	require.Nil(t, err)
-	assert.Equal(t, testIgn2Config, convertedIgn)
+	assert.Equal(t, testIgn3Config, convertedIgn)
+
+	// Make a valid Ign 3.1 cfg
+	testIgn3Config.Ignition.Version = "3.1.0"
+	// turn it into a raw []byte
+	rawIgn = helpers.MarshalOrDie(testIgn3Config)
+	// check that it was parsed successfully
+	convertedIgn, err = ParseAndConvertConfig(rawIgn)
+	require.Nil(t, err)
+	assert.Equal(t, testIgn3Config, convertedIgn)
 
 	// Make a valid Ign 3.0 cfg
 	testIgn3Config.Ignition.Version = "3.0.0"
 	// turn it into a raw []byte
 	rawIgn = helpers.MarshalOrDie(testIgn3Config)
-	// check that it was parsed successfully
-	convertedIgn, err = IgnParseWrapper(rawIgn)
+	// check that it was parsed successfully back to 3.1
+	convertedIgn, err = ParseAndConvertConfig(rawIgn)
 	require.Nil(t, err)
-	assert.Equal(t, testIgn2Config, convertedIgn)
+	testIgn3Config.Ignition.Version = "3.1.0"
+	assert.Equal(t, testIgn3Config, convertedIgn)
 
 	// Make a bad Ign3 cfg
 	testIgn3Config.Ignition.Version = "21.0.0"
 	rawIgn = helpers.MarshalOrDie(testIgn3Config)
 	// check that it failed since this is an invalid cfg
-	convertedIgn, err = IgnParseWrapper(rawIgn)
+	convertedIgn, err = ParseAndConvertConfig(rawIgn)
 	require.NotNil(t, err)
-	assert.Equal(t, ign2types.Config{}, convertedIgn)
+	assert.Equal(t, ign3types.Config{}, convertedIgn)
 }
