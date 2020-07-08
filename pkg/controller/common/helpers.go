@@ -360,7 +360,7 @@ func removeIgnDuplicateFilesAndUnits(ignConfig ign2types.Config) ign2types.Confi
 						for _, newDropin := range units[i].Dropins {
 							hasExistingDropin := false
 							for _, existingDropins := range outUnits[j].Dropins {
-								if existingDropins.Name != newDropin.Name {
+								if existingDropins.Name == newDropin.Name {
 									hasExistingDropin = true
 									break
 								}
@@ -372,7 +372,7 @@ func removeIgnDuplicateFilesAndUnits(ignConfig ign2types.Config) ign2types.Confi
 						continue
 					}
 				}
-				glog.Infof("Found duplicate unit %v, appending dropin section", unitName)
+				glog.V(2).Infof("Found duplicate unit %v, appending dropin section", unitName)
 			}
 			continue
 		}
@@ -380,16 +380,9 @@ func removeIgnDuplicateFilesAndUnits(ignConfig ign2types.Config) ign2types.Confi
 		unitNameMap[unitName] = true
 	}
 
-	for _, unit := range outUnits {
-		glog.Infof("Remaining unit: %v", unit.Name)
-	}
 	// outFiles and outUnits should now have all duplication removed
 	ignConfig.Storage.Files = outFiles
 	ignConfig.Systemd.Units = outUnits
-
-	for _, unit := range ignConfig.Systemd.Units {
-		glog.Infof("Remaining unit in final conf: %v", unit.Name)
-	}
 
 	return ignConfig
 }
