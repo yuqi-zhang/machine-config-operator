@@ -51,8 +51,9 @@ github.com/containers/storage/pkg/homedir
 github.com/containers/storage/pkg/idtools
 github.com/containers/storage/pkg/mount
 github.com/containers/storage/pkg/system
-# github.com/coreos/fcct v0.5.0
-github.com/coreos/fcct/base/v0_1
+# github.com/coreos/fcct v0.6.0
+github.com/coreos/fcct/base
+github.com/coreos/fcct/base/v0_2
 github.com/coreos/fcct/translate
 # github.com/coreos/go-semver v0.3.0
 github.com/coreos/go-semver/semver

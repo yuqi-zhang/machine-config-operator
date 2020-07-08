@@ -8,7 +8,8 @@ import (
 	"sort"
 
 	"github.com/clarketm/json"
-	fcctbase "github.com/coreos/fcct/base/v0_1"
+	fcctbase "github.com/coreos/fcct/base"
+	fcctbase_0_2 "github.com/coreos/fcct/base/v0_2"
 	"github.com/coreos/ign-converter/translate/v23tov30"
 	"github.com/coreos/ign-converter/translate/v31tov22"
 	ign2error "github.com/coreos/ignition/config/shared/errors"
@@ -390,11 +391,11 @@ func removeIgnDuplicateFilesAndUnits(ignConfig ign2types.Config) ign2types.Confi
 // TranspileCoreOSConfigToIgn transpiles Fedora CoreOS config to ignition
 // internally it transpiles to Ign spec v3 config
 func TranspileCoreOSConfigToIgn(files, units []string) (*ign3types.Config, error) {
-	var ctCfg fcctbase.Config
+	var ctCfg fcctbase_0_2.Config
 	overwrite := true
 	// Convert data to Ignition resources
 	for _, d := range files {
-		f := new(fcctbase.File)
+		f := new(fcctbase_0_2.File)
 		if err := yaml.Unmarshal([]byte(d), f); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal file into struct: %v", err)
 		}
@@ -402,25 +403,25 @@ func TranspileCoreOSConfigToIgn(files, units []string) (*ign3types.Config, error
 
 		// Add the file to the config
 		ctCfg.Storage.Files = append(ctCfg.Storage.Files, *f)
+
 	}
 
 	for _, d := range units {
-		u := new(fcctbase.Unit)
+		u := new(fcctbase_0_2.Unit)
 		if err := yaml.Unmarshal([]byte(d), u); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal systemd unit into struct: %v", err)
 		}
 
+		var ctCfg fcctbase_0_2.Config
 		// Add the unit to the config
 		ctCfg.Systemd.Units = append(ctCfg.Systemd.Units, *u)
+
 	}
 
-	ign3_0config, tSet, err := ctCfg.ToIgn3_0()
-	if err != nil {
-		return nil, fmt.Errorf("failed to transpile config to Ignition config %s\nTranslation set: %v", err, tSet)
+	ign3config, tSet, rpt := ctCfg.ToIgn3_1(fcctbase.TranslateOptions{FilesDir: ""})
+	if rpt.IsFatal() {
+		return nil, fmt.Errorf("failed to transpile config to Ignition config, report: %v\nTranslation set: %v", rpt, tSet)
 	}
-
-	// Workaround to get a v3.1 config
-	ign3config := translate3.Translate(ign3_0config)
 
 	return &ign3config, nil
 }
