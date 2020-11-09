@@ -165,6 +165,14 @@ const (
 	onceFromRemoteConfig
 )
 
+type rebootAction int
+
+const (
+	rebootActionNone rebootAction = iota
+	rebootActionReloadCrio
+	rebootActionReboot
+)
+
 var (
 	defaultRebootTimeout = 24 * time.Hour
 )
@@ -973,6 +981,7 @@ func upgradeHackFor44AndBelow() error {
 // Some more background in this PR: https://github.com/openshift/machine-config-operator/pull/245
 //nolint:gocyclo
 func (dn *Daemon) checkStateOnFirstRun() error {
+	// TODO: entry here
 	node, err := dn.loadNodeAnnotations(dn.node)
 	if err != nil {
 		return err
@@ -1015,6 +1024,7 @@ func (dn *Daemon) checkStateOnFirstRun() error {
 		if err := dn.drain(); err != nil {
 			return err
 		}
+		// TODO: consider handling this case
 		return dn.finalizeAndReboot(state.pendingConfig)
 	}
 
@@ -1039,6 +1049,7 @@ func (dn *Daemon) checkStateOnFirstRun() error {
 			if err := os.RemoveAll(osImageContentDir); err != nil {
 				return err
 			}
+			// TODO: consider handling this case
 			return dn.finalizeAndReboot(state.currentConfig)
 		}
 		glog.Info("No bootstrap pivot required; unlinking bootstrap node annotations")

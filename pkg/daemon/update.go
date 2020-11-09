@@ -434,6 +434,10 @@ func (dn *Daemon) update(oldConfig, newConfig *mcfgv1.MachineConfig) (retErr err
 
 	dn.logSystem("Starting update from %s to %s: %+v", oldConfigName, newConfigName, diff)
 
+	// Intercept our normal reboot sequence here and perform actions to determine what needs to be done
+	// TODO: consider how we should honor "force" flag here. Maybe if force, always reboot?
+	// TODO: consider if we should "cordon" the node anyways
+
 	if err := dn.drain(); err != nil {
 		return err
 	}
@@ -509,6 +513,8 @@ func (dn *Daemon) update(oldConfig, newConfig *mcfgv1.MachineConfig) (retErr err
 		glog.Info("Updated kernel tuning arguments")
 	}
 
+	// TODO: instead of always rebooting here, perform the switch-over to next state check
+	// perhaps by queue'ing a node sync?
 	return dn.finalizeAndReboot(newConfig)
 }
 
@@ -526,6 +532,16 @@ type machineConfigDiff struct {
 	kernelType bool
 	extensions bool
 }
+
+// TODO: consider either reworking the above struct, or creating a new one to hold the
+// functional diffs between configs
+// Need at least passwd, file, unit changes
+
+// func deriveMachineConfigDiffs(oldConfig, newConfig *mcfgv1.MachineConfig) (diffs, err) {
+// }
+
+// func deriveRebootActionFromDiffs(diff diff) (*machineConfigDiff, error) (rebootAction, err) {
+// }
 
 // isEmpty returns true if the machineConfigDiff has no changes, or
 // in other words if the two MachineConfig objects are equivalent from
