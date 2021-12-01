@@ -122,7 +122,14 @@ func (sh *APIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		version:           reqConfigVer,
 	}
 
-	conf, err := sh.server.GetConfig(cr)
+	var conf *runtime.RawExtension
+	// hard coded for PoC purposes
+	if poolName == "layered-worker" {
+		conf, err = sh.server.GetLayeredConfig(cr)
+	} else {
+		conf, err = sh.server.GetConfig(cr)
+	}
+
 	if err != nil {
 		w.Header().Set("Content-Length", "0")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -392,4 +399,8 @@ func cipherOrder() []uint16 {
 	}
 
 	return append(first, second...)
+}
+
+func getLayeredConfig(w *http.ResponseWriter, r *http.Request) {
+
 }

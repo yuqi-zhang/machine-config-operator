@@ -18,9 +18,12 @@ var firstbootCompleteMachineconfig = &cobra.Command{
 	Run:                   executeFirstbootCompleteMachineConfig,
 }
 
+var layeredImage bool
+
 // init executes upon import
 func init() {
 	rootCmd.AddCommand(firstbootCompleteMachineconfig)
+	startCmd.PersistentFlags().BoolVarP(&layeredImage, "layered", "", false, "Bootstrap with layered image")
 	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
 }
 
@@ -36,6 +39,9 @@ func runFirstBootCompleteMachineConfig(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
+	if layeredImage {
+		return dn.RunFirstbootCompleteMachineconfigLayered()
+	}
 	return dn.RunFirstbootCompleteMachineconfig()
 }
 

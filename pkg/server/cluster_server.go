@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"path/filepath"
 
+	ign3types "github.com/coreos/ignition/v2/config/v3_2/types"
 	yaml "github.com/ghodss/yaml"
 	ctrlcommon "github.com/openshift/machine-config-operator/pkg/controller/common"
 	corev1 "k8s.io/api/core/v1"
@@ -95,6 +96,73 @@ func (cs *clusterServer) GetConfig(cr poolRequest) (*runtime.RawExtension, error
 	}
 
 	rawConf, err := json.Marshal(ignConf)
+	if err != nil {
+		return nil, err
+	}
+	return &runtime.RawExtension{Raw: rawConf}, nil
+}
+
+func (cs *clusterServer) GetLayeredConfig(cr poolRequest) (*runtime.RawExtension, error) {
+	// Here we construct a layered image setup for bootstrapping a node. Currently hardcoded to worker
+	mp, err := cs.machineClient.MachineConfigPools().Get(context.TODO(), "worker", metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("could not fetch pool. err: %v", err)
+	}
+
+	var currConf string
+	if mp.Status.UpdatedMachineCount > 0 {
+		currConf = mp.Spec.Configuration.Name
+	} else {
+		currConf = mp.Status.Configuration.Name
+	}
+
+	mc, err := cs.machineClient.MachineConfigs().Get(context.TODO(), currConf, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("could not fetch config %s, err: %v", currConf, err)
+	}
+	ignConf, err := ctrlcommon.ParseAndConvertConfig(mc.Spec.Config.Raw)
+	if err != nil {
+		return nil, fmt.Errorf("parsing Ignition config failed with error: %v", err)
+	}
+
+	// Extract the pull secret and the MCD layered service
+	servedConf := ign3types.Config{
+		Ignition: ign3types.Ignition{
+			Version: ign3types.MaxVersion.String(),
+		},
+	}
+	for _, f := range ignConf.Storage.Files {
+		if f.Path == "/var/lib/kubelet/config.json" {
+			servedConf.Storage.Files = append(servedConf.Storage.Files, f)
+			break
+		}
+	}
+	for _, u := range ignConf.Systemd.Units {
+		if u.Name == "machine-config-daemon-firstboot-layered.service" || u.Name == "machine-config-daemon-pull.service" {
+			enabled := true
+			u.Enabled = &enabled
+			servedConf.Systemd.Units = append(servedConf.Systemd.Units, u)
+		}
+	}
+
+	// Appenders are interesting, should check into which are needed, but essentially this appears to be:
+	// node annotations - goes into /etc/machine-config-daemon/node-annotations.json
+	// KubeConfig - /etc/kubernetes/kubeconfig presumably used for oc extract, maybe needed?
+	// initial contents - /etc/mcs-machine-config-content.json
+	// appendEncapsulated - /etc/ignition-machine-config-encapsulated.json removes ignition
+	appenders := getAppenders(currConf, cr.version, cs.kubeconfigFunc)
+	for _, a := range appenders {
+		if err := a(&servedConf, mc); err != nil {
+			return nil, err
+		}
+	}
+
+	// at this point, we should have the following:
+	// 1. pull secret
+	// 2. MCD pull service
+	// 3. layered MCD firstboot service (to consume everything)
+	// appenders listed above
+	rawConf, err := json.Marshal(servedConf)
 	if err != nil {
 		return nil, err
 	}

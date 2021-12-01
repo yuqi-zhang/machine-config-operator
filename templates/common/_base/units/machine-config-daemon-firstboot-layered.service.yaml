@@ -1,0 +1,25 @@
+name: machine-config-daemon-firstboot-layered.service
+enabled: false
+contents: |
+  [Unit]
+  Description=Machine Config Daemon Firstboot Layered
+  # Make sure it runs only on OSTree booted system
+  ConditionPathExists=/run/ostree-booted
+  # Removal of this file signals firstboot completion
+  ConditionPathExists=/etc/ignition-machine-config-encapsulated.json
+  After=machine-config-daemon-pull.service
+  Before=crio.service kubelet.service
+
+  [Service]
+  Type=oneshot
+  RemainAfterExit=yes
+  # Disable existing repos (if any) so that OS extensions would use embedded RPMs only
+  ExecStartPre=-/usr/bin/sh -c "sed -i 's/enabled=1/enabled=0/' /etc/yum.repos.d/*.repo"
+  ExecStart=/run/bin/machine-config-daemon firstboot-complete-machineconfig --layered
+  {{if .Proxy -}}
+  EnvironmentFile=/etc/mco/proxy.env
+  {{end -}}
+
+  [Install]
+  WantedBy=multi-user.target
+  RequiredBy=crio.service kubelet.service

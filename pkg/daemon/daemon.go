@@ -571,6 +571,22 @@ func (dn *Daemon) RunFirstbootCompleteMachineconfig() error {
 	return dn.reboot(fmt.Sprintf("Completing firstboot provisioning to %s", mc.GetName()))
 }
 
+// PoC updating from layered image
+func (dn *Daemon) RunFirstbootCompleteMachineconfigLayered() error {
+	// First, we should pull in the layered image from somewhere - TBD
+	// Should we be using podman directly? oc image extract?
+
+	// Then we should perform other necessary changes, e.g. processing kargs/extensions
+
+	// Prep layered update
+
+	// Remove manually written files
+
+	// Update and reboot
+
+	return nil
+}
+
 // InstallSignalHandler installs the handler for the signals the daemon should act on
 func (dn *Daemon) InstallSignalHandler(signaled chan struct{}) {
 	termChan := make(chan os.Signal, 2048)

@@ -117,6 +117,11 @@ func (bsc *bootstrapServer) GetConfig(cr poolRequest) (*runtime.RawExtension, er
 	return &runtime.RawExtension{Raw: rawConf}, nil
 }
 
+func (bsc *bootstrapServer) GetLayeredConfig(cr poolRequest) (*runtime.RawExtension, error) {
+	// TODO
+	return nil, fmt.Errorf("Not yet implemented")
+}
+
 func kubeconfigFromFile(path string) ([]byte, []byte, error) {
 	kcData, err := ioutil.ReadFile(path)
 	if err != nil {
