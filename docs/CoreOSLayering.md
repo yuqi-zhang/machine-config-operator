@@ -161,6 +161,14 @@ A    node-sizing.env
 A    resolv.conf
 ```
 
+### Bootstrap node and control plane provisioning
+
+Do we want to run a build in the bootstrap node? Or do we provision control plane nodes differently?
+
+### Bootstrap-in-place
+
+Does that still use onceFrom? Since the bootstrap node likely will be full ignition, do we need to clean things up there?
+
 ### Things to consider
 
 1. How to differentiate requests for layered image provisioning vs what we have today (maybe not relevant in the long run)
