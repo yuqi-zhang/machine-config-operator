@@ -163,7 +163,7 @@ A    resolv.conf
 
 ### Things to consider
 
-1. How to differentiate requests for layered bootstrap vs regular bootstrap (maybe not relevant in the long run)
+1. How to differentiate requests for layered image provisioning vs what we have today (maybe not relevant in the long run)
 1. What is needed to be served to the node initially
 1. How do we specify what layered image to be on? Should this be a MCP field
 1. What metadata do we need to save

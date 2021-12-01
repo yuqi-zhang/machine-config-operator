@@ -573,8 +573,9 @@ func (dn *Daemon) RunFirstbootCompleteMachineconfig() error {
 
 // PoC updating from layered image
 func (dn *Daemon) RunFirstbootCompleteMachineconfigLayered() error {
-	// First, we should pull in the layered image from somewhere - TBD
-	// Should we be using podman directly? oc image extract?
+	// First, we should pull in the layered image from somewhere via rpm-ostree
+	// Would likely require us to set up access to the in-cluster registry https://docs.openshift.com/container-platform/4.9/registry/accessing-the-registry.html#registry-accessing-directly_accessing-the-registry
+	// We do store the kubeconfig so maybe we can use that?
 
 	// Then we should perform other necessary changes, e.g. processing kargs/extensions
 
