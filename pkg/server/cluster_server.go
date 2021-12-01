@@ -145,6 +145,9 @@ func (cs *clusterServer) GetLayeredConfig(cr poolRequest) (*runtime.RawExtension
 		}
 	}
 
+	// TODO extract non - files/units sections
+	// e.g. paritioning still needs to be handled by ignition preferrably
+
 	// Appenders are interesting, should check into which are needed, but essentially this appears to be:
 	// node annotations - goes into /etc/machine-config-daemon/node-annotations.json
 	// KubeConfig - /etc/kubernetes/kubeconfig presumably used for oc extract, maybe needed?
