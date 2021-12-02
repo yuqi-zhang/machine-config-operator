@@ -2,6 +2,20 @@
 
 ## Bootstrap PoC
 
+### General Ideas
+
+There are a few ways we can approach this topic. The central questions to this is how we:
+
+1. How much of the config can we build into the layered image
+1. Divide responsibilities between ignition and MCD
+1. Whether we can do builds in the bootstrap node
+
+We could go so far as to have ignition still provision the full system. The MCD firstboot service would remove all manual ignition changes and pivot directly to the layered image. Generally though I think we should split the responsibilities more cleanly and have ignition only provision things that are required during node provisioning, and have the MCD clean up that subset of configs before pivot, which is what this PoC will attempt.
+
+There is also the general question of what we can do to track the diffs/metadata of configs we own. The MCD will likely have to revert a node to pre-machineconfig state (remove MC changes but keep other manual customizations owned outside the MCO), since this will be required to upgrade from existing configs + perform bootstrap-in-place. In that sense upgrade + boostrap-in-place is the same general problem.
+
+### Steps
+
 1. Have the MCS understand how to serve a "layered image"
 
 Currently we would serve on a different endpoint for PoC purposes
@@ -167,7 +181,7 @@ Do we want to run a build in the bootstrap node? Or do we provision control plan
 
 ### Bootstrap-in-place
 
-Does that still use onceFrom? Since the bootstrap node likely will be full ignition, do we need to clean things up there?
+Does that still use onceFrom? Since the bootstrap node likely will be full ignition, do we need to clean things up there? (We can consider this as upgrade place, basically, and not really bootstrap)
 
 ### Things to consider
 
