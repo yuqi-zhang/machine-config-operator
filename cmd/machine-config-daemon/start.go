@@ -34,6 +34,7 @@ var (
 		nodeName               string
 		rootMount              string
 		onceFrom               string
+		fromDir                string
 		skipReboot             bool
 		fromIgnition           bool
 		kubeletHealthzEnabled  bool
@@ -48,6 +49,7 @@ func init() {
 	startCmd.PersistentFlags().StringVar(&startOpts.nodeName, "node-name", "", "kubernetes node name daemon is managing.")
 	startCmd.PersistentFlags().StringVar(&startOpts.rootMount, "root-mount", "/rootfs", "where the nodes root filesystem is mounted for chroot and file manipulation.")
 	startCmd.PersistentFlags().StringVar(&startOpts.onceFrom, "once-from", "", "Runs the daemon once using a provided file path or URL endpoint as its machine config or ignition (.ign) file source")
+	startCmd.PersistentFlags().StringVar(&startOpts.fromDir, "from-dir", "", "Runs an upgrade between two files currentConfig.json and desiredConfig.json without API interaction. Testing for hypershift.")
 	startCmd.PersistentFlags().BoolVar(&startOpts.skipReboot, "skip-reboot", false, "Skips reboot after a sync, applies only in once-from")
 	startCmd.PersistentFlags().BoolVar(&startOpts.kubeletHealthzEnabled, "kubelet-healthz-enabled", true, "kubelet healthz endpoint monitoring")
 	startCmd.PersistentFlags().StringVar(&startOpts.kubeletHealthzEndpoint, "kubelet-healthz-endpoint", "http://localhost:10248/healthz", "healthz endpoint to check health")
@@ -111,7 +113,8 @@ func runStartCmd(cmd *cobra.Command, args []string) {
 	os.Setenv("RPMOSTREE_CLIENT_ID", "machine-config-operator")
 
 	onceFromMode := startOpts.onceFrom != ""
-	if !onceFromMode {
+	fromDirMode := startOpts.fromDir != ""
+	if !onceFromMode && !fromDirMode {
 		// in the daemon case
 		if err := bindPodMounts(startOpts.rootMount); err != nil {
 			glog.Fatalf("Binding pod mounts: %+v", err)
@@ -154,6 +157,14 @@ func runStartCmd(cmd *cobra.Command, args []string) {
 	// the bare Daemon
 	if startOpts.onceFrom != "" {
 		err = dn.RunOnceFrom(startOpts.onceFrom, startOpts.skipReboot)
+		if err != nil {
+			glog.Fatalf("%v", err)
+		}
+		return
+	}
+
+	if fromDirMode {
+		err = dn.RunFromDir(startOpts.fromDir)
 		if err != nil {
 			glog.Fatalf("%v", err)
 		}

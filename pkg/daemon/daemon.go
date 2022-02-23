@@ -568,6 +568,135 @@ func (dn *Daemon) RunOnceFrom(onceFrom string, skipReboot bool) error {
 	return errors.New("unsupported onceFrom type provided")
 }
 
+// RunFromDir is the primary entrypoint for Hypershift
+func (dn *Daemon) RunFromDir(fromDir string) (retErr error) {
+	path, err := filepath.Abs(filepath.Clean(fromDir))
+	if err != nil {
+		return errors.Wrapf(err, "cannot load fromDir")
+	}
+	// hard-coded paths for now
+	currentConfigPath := filepath.Join(path, "currentConfig.json")
+	currentConfigBytes, err := ioutil.ReadFile(currentConfigPath)
+	if err != nil {
+		return errors.Wrapf(err, "cannot read fromDir currentConfig")
+	}
+	oldConfig, err := mcoResourceRead.ReadMachineConfigV1(currentConfigBytes)
+	if err != nil {
+		return errors.Wrapf(err, "cannot parse fromDir currentConfig")
+	}
+	glog.Info("Successfully loaded currentConfig")
+
+	desiredConfigPath := filepath.Join(path, "desiredConfig.json")
+	desiredConfigBytes, err := ioutil.ReadFile(desiredConfigPath)
+	if err != nil {
+		return errors.Wrapf(err, "cannot read fromDir desiredConfig")
+	}
+	newConfig, err := mcoResourceRead.ReadMachineConfigV1(desiredConfigBytes)
+	if err != nil {
+		return errors.Wrapf(err, "cannot parse fromDir desiredConfig")
+	}
+	glog.Info("Successfully loaded desiredConfig")
+
+	// For now a subsection of the update() func
+	oldConfig = canonicalizeEmptyMC(oldConfig)
+	oldIgnConfig, err := ctrlcommon.ParseAndConvertConfig(oldConfig.Spec.Config.Raw)
+	if err != nil {
+		return fmt.Errorf("parsing old Ignition config failed: %w", err)
+	}
+	newIgnConfig, err := ctrlcommon.ParseAndConvertConfig(newConfig.Spec.Config.Raw)
+	if err != nil {
+		return fmt.Errorf("parsing new Ignition config failed: %w", err)
+	}
+
+	// update files on disk that need updating
+	if err := dn.updateFiles(oldIgnConfig, newIgnConfig); err != nil {
+		return err
+	}
+
+	defer func() {
+		if retErr != nil {
+			if err := dn.updateFiles(newIgnConfig, oldIgnConfig); err != nil {
+				retErr = errors.Wrapf(retErr, "error rolling back files writes %v", err)
+				return
+			}
+		}
+	}()
+
+	if err := dn.updateSSHKeys(newIgnConfig.Passwd.Users); err != nil {
+		return err
+	}
+
+	defer func() {
+		if retErr != nil {
+			if err := dn.updateSSHKeys(oldIgnConfig.Passwd.Users); err != nil {
+				retErr = errors.Wrapf(retErr, "error rolling back SSH keys updates %v", err)
+				return
+			}
+		}
+	}()
+
+	// duplicated from OS Changes
+	var osImageContentDir string
+	if osImageContentDir, err = ExtractOSImage(newConfig.Spec.OSImageURL); err != nil {
+		return err
+	}
+	// Delete extracted OS image once we are done.
+	defer os.RemoveAll(osImageContentDir)
+
+	if dn.os.IsCoreOSVariant() {
+		if err := addExtensionsRepo(osImageContentDir); err != nil {
+			return err
+		}
+		defer os.Remove(extensionsRepo)
+	}
+
+	// Update OS
+	if err := dn.updateOS(newConfig, osImageContentDir); err != nil {
+		return err
+	}
+
+	defer func() {
+		// Operations performed by rpm-ostree on the booted system are available
+		// as staged deployment. It gets applied only when we reboot the system.
+		// In case of an error during any rpm-ostree transaction, removing pending deployment
+		// should be sufficient to discard any applied changes.
+		if retErr != nil {
+			// Print out the error now so that if we fail to cleanup -p, we don't lose it.
+			glog.Infof("Rolling back applied changes to OS due to error: %v", retErr)
+			if err := removePendingDeployment(); err != nil {
+				retErr = errors.Wrapf(retErr, "error removing staged deployment: %v", err)
+				return
+			}
+		}
+	}()
+
+	// Apply kargs
+	if err := dn.updateKernelArguments(oldConfig, newConfig); err != nil {
+		return err
+	}
+
+	// Switch to real time kernel
+	if err := dn.switchKernel(oldConfig, newConfig); err != nil {
+		return err
+	}
+
+	// Apply extensions
+	if err := dn.applyExtensions(oldConfig, newConfig); err != nil {
+		return err
+	}
+
+	tuningChanged, err := UpdateTuningArgs(KernelTuningFile, CmdLineFile)
+	if err != nil {
+		return err
+	}
+	if tuningChanged {
+		glog.Info("Updated kernel tuning arguments")
+	}
+
+	glog.Info("Successfully completed fromDir update")
+	return nil
+}
+
 // RunFirstbootCompleteMachineconfig is run via systemd on the first boot
 // to complete processing of the target MachineConfig.
 func (dn *Daemon) RunFirstbootCompleteMachineconfig() error {
