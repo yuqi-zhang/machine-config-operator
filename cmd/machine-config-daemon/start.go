@@ -35,6 +35,8 @@ var (
 		kubeconfig             string
 		nodeName               string
 		rootMount              string
+		hypershift             string
+		auth                   string
 		onceFrom               string
 		skipReboot             bool
 		fromIgnition           bool
@@ -49,6 +51,8 @@ func init() {
 	startCmd.PersistentFlags().StringVar(&startOpts.kubeconfig, "kubeconfig", "", "Kubeconfig file to access a remote cluster (testing only)")
 	startCmd.PersistentFlags().StringVar(&startOpts.nodeName, "node-name", "", "kubernetes node name daemon is managing.")
 	startCmd.PersistentFlags().StringVar(&startOpts.rootMount, "root-mount", "/rootfs", "where the nodes root filesystem is mounted for chroot and file manipulation.")
+	startCmd.PersistentFlags().StringVar(&startOpts.hypershift, "hypershift", "", "Runs the daemon with a MCS URL endpoint to fetch the incoming desired config")
+	startCmd.PersistentFlags().StringVar(&startOpts.auth, "auth", "", "Token to access MCS, used only in Hypershift")
 	startCmd.PersistentFlags().StringVar(&startOpts.onceFrom, "once-from", "", "Runs the daemon once using a provided file path or URL endpoint as its machine config or ignition (.ign) file source")
 	startCmd.PersistentFlags().BoolVar(&startOpts.skipReboot, "skip-reboot", false, "Skips reboot after a sync, applies only in once-from")
 	startCmd.PersistentFlags().BoolVar(&startOpts.kubeletHealthzEnabled, "kubelet-healthz-enabled", true, "kubelet healthz endpoint monitoring")
@@ -113,6 +117,7 @@ func runStartCmd(cmd *cobra.Command, args []string) {
 	os.Setenv("RPMOSTREE_CLIENT_ID", "machine-config-operator")
 
 	onceFromMode := startOpts.onceFrom != ""
+	hypershiftMode := startOpts.hypershift != ""
 	if !onceFromMode {
 		// in the daemon case
 		if err := bindPodMounts(startOpts.rootMount); err != nil {
@@ -201,6 +206,43 @@ func runStartCmd(cmd *cobra.Command, args []string) {
 	// This channel is used to ensure all spawned goroutines exit when we exit.
 	stopCh := make(chan struct{})
 	defer close(stopCh)
+
+	// For Hypershift, we at least need
+	//   a) the drainer
+	//   b) connection to the node
+	// TODO work that in
+	if hypershiftMode {
+		podName, ok := os.LookupEnv("POD_NAME")
+		if !ok || podName == "" {
+			glog.Fatalf("pod name is required for hypershift drainer")
+		}
+		glog.Infof("Pod name is %s", podName)
+
+		ctx := ctrlcommon.CreateControllerContext(cb, stopCh, componentName)
+		// create the daemon instance. this also initializes kube client items
+		// which need to come from the container and not the chroot.
+		dn.ClusterConnect(
+			startOpts.nodeName,
+			kubeClient,
+			ctx.InformerFactory.Machineconfiguration().V1().MachineConfigs(),
+			ctx.KubeInformerFactory.Core().V1().Nodes(),
+			startOpts.kubeletHealthzEnabled,
+			startOpts.kubeletHealthzEndpoint,
+		)
+		if err != nil {
+			glog.Fatalf("Failed to initialize daemon: %v", err)
+		}
+		ctx.KubeInformerFactory.Start(stopCh)
+		ctx.InformerFactory.Start(stopCh)
+		close(ctx.InformersStarted)
+
+		dn.HypershiftDrainer(kubeClient, podName)
+		err = dn.RunHypershift(startOpts.hypershift, startOpts.auth)
+		if err != nil {
+			glog.Fatalf("%v", err)
+		}
+		return
+	}
 
 	// Start local metrics listener
 	go daemon.StartMetricsListener(startOpts.promMetricsURL, stopCh)

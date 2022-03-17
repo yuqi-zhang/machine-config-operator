@@ -3,6 +3,7 @@ package daemon
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -335,6 +336,37 @@ func (dn *Daemon) ClusterConnect(
 	}
 }
 
+// HypershiftDrainer sets up a custom drain interface for Hypershift
+func (dn *Daemon) HypershiftDrainer(kubeClient kubernetes.Interface, podName string) {
+	dn.kubeClient = kubeClient
+	dn.drainer = &drain.Helper{
+		Client:              dn.kubeClient,
+		Force:               true,
+		IgnoreAllDaemonSets: true,
+		DeleteEmptyDirData:  true,
+		GracePeriodSeconds:  -1,
+		Timeout:             90 * time.Second,
+		OnPodDeletedOrEvicted: func(pod *corev1.Pod, usingEviction bool) {
+			verbStr := "Deleted"
+			if usingEviction {
+				verbStr = "Evicted"
+			}
+			glog.Infof("%s pod %s/%s", verbStr, pod.Namespace, pod.Name)
+		},
+		AdditionalFilters: []drain.PodFilter{
+			func(pod corev1.Pod) drain.PodDeleteStatus {
+				if pod.Name == podName {
+					return drain.MakePodDeleteStatusSkip()
+				}
+				return drain.MakePodDeleteStatusOkay()
+			},
+		},
+		Out:    writer{glog.Info},
+		ErrOut: writer{glog.Error},
+		Ctx:    context.TODO(),
+	}
+}
+
 // writer implements io.Writer interface as a pass-through for klog.
 type writer struct {
 	logFunc func(args ...interface{})
@@ -551,6 +583,196 @@ func (dn *Daemon) detectEarlySSHAccessesFromBoot() error {
 			return err
 		}
 	}
+	return nil
+}
+
+// RunHypershift is the primary entrypoint for Hypershift
+func (dn *Daemon) RunHypershift(hypershiftEndpoint string, auth string) (retErr error) {
+	// First, get the current and desired configurations for the node
+	// current configuration will be read from on-disk state, either
+	//   a) /etc/machine-config-daemon/currentconfig, written by a previous hypershift-mode MCD
+	//   b) /etc/mcs-machine-config-content.json, written by MCS when the node is provisioned,
+	//      if no MCD has operated on this node
+	// desired configuration will be read directly off the MCS endpoint passed in via the MCD flag.
+	// in Hypershift, we will also need a authorization bearer token. For now, we will pass this in
+	// as another flag, but we can instead read it off an env var
+
+	mcsServedConfigPath := "/etc/mcs-machine-config-content.json"
+	currentConfigBytes, err := ioutil.ReadFile(currentConfigPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			currentConfigBytes, err = ioutil.ReadFile(mcsServedConfigPath)
+			if err != nil {
+				return errors.Wrapf(err, "Cannot find any existing configuration on disk")
+			}
+		} else {
+			return errors.Wrapf(err, "Failed to load local config")
+		}
+	}
+
+	var currentConfig mcfgv1.MachineConfig
+	err = json.Unmarshal(currentConfigBytes, &currentConfig)
+	if err != nil {
+		return errors.Wrapf(err, "Cannot read on-disk state into MachineConfig")
+	}
+	glog.Infof("Successfully read currentConfig")
+
+	// TODO get desired config
+	// The MCS only serves in Ignition and not MachineConfig format.
+	// Luckily, we append the full "real" MachineConfig to the served config already today
+	// in /etc/mcs-machine-config-content.json. We should be able to just pull that out
+	req, err := http.NewRequest("GET", hypershiftEndpoint, nil)
+	if err != nil {
+		return errors.Wrapf(err, "Failed to construct request")
+	}
+	req.Header.Set("Accept", "application/vnd.coreos.ignition+json;version=3.2.0, */*;q=0.1")
+	if auth != "" {
+		bearer := "Bearer " + auth
+		req.Header.Add("Authorization", bearer)
+	}
+
+	// TODO probably shouldn't do this, but the Ignition CA I think only exists as part
+	// of the stub Ignition
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	client := &http.Client{Transport: tr}
+	resp, err := client.Do(req)
+	if err != nil {
+		return errors.Wrapf(err, "Failed to get desired config from MCS endpoint")
+	}
+	defer resp.Body.Close()
+
+	respData, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	ignConfig, err := ctrlcommon.ParseAndConvertConfig(respData)
+	if err != nil {
+		return errors.Wrapf(err, "Failed to parse Ignition from MCS endpoint")
+	}
+
+	desiredConfigBytes, err := ctrlcommon.GetIgnitionFileDataByPath(&ignConfig, mcsServedConfigPath)
+	if err != nil {
+		return errors.Wrapf(err, "Failed to find desiredConfig from MCS served path %s", mcsServedConfigPath)
+	}
+
+	var desiredConfig mcfgv1.MachineConfig
+	err = json.Unmarshal(desiredConfigBytes, &desiredConfig)
+	if err != nil {
+		return errors.Wrapf(err, "Cannot decode desiredConfig from MCS served path %s", mcsServedConfigPath)
+	}
+
+	// glog.Infof("Update prep complete. CurrentConfig %s \n DesiredConfig %s", currentConfigBytes, desiredConfigBytes)
+
+	// check update reconcilability
+	mcDiff, err := reconcilable(&currentConfig, &desiredConfig)
+	if err != nil {
+		return errors.Wrapf(err, "The update is not reconcilable")
+	}
+
+	glog.Infof("Update is reconcilable. Diff: %v", mcDiff)
+
+	// To match existing MCD behaviour, we will also need to drain, likely also needs to be configurable.
+	// Again, we can pass this in via a flag or env var.
+	// We will also need our own pod name such that we can craft a selector, to not drain ourselves.
+	// Note that the controller would need to uncordon the node after the update, likely after it has
+	// checked for update success (see below)
+
+	oldIgnConfig, err := ctrlcommon.ParseAndConvertConfig(currentConfig.Spec.Config.Raw)
+	if err != nil {
+		return fmt.Errorf("parsing old Ignition config failed: %w", err)
+	}
+	newIgnConfig, err := ctrlcommon.ParseAndConvertConfig(desiredConfig.Spec.Config.Raw)
+	if err != nil {
+		return fmt.Errorf("parsing new Ignition config failed: %w", err)
+	}
+	diffFileSet := ctrlcommon.CalculateConfigFileDiffs(&oldIgnConfig, &newIgnConfig)
+	actions, err := calculatePostConfigChangeAction(mcDiff, diffFileSet)
+	if err != nil {
+		return err
+	}
+	drain, err := isDrainRequired(actions, diffFileSet, oldIgnConfig, newIgnConfig)
+	if err != nil {
+		return err
+	}
+
+	glog.Infof("...Should be draining here %v", drain)
+
+	// For testing purposes, always drain
+	drain = true
+	if drain {
+		// Skip drain process when we're not cluster driven
+		if dn.kubeClient == nil {
+			return errors.Wrapf(err, "Kubeclient is nil during update")
+		}
+
+		glog.Infof("Preparing to cordon")
+		node, err := dn.nodeLister.Get(dn.name)
+		if err != nil {
+			return errors.Wrapf(err, "Cannot get node object")
+		}
+		if dn.node == nil {
+			dn.node = node
+			if err := dn.initializeNode(); err != nil {
+				return err
+			}
+		} else {
+			dn.node = node
+		}
+		if err := dn.cordonOrUncordonNode(true); err != nil {
+			return err
+		}
+
+		glog.Infof("Preparing to drain")
+		if err := dn.drain(); err != nil {
+			return err
+		}
+	} else {
+		glog.Info("Changes do not require drain, skipping.")
+	}
+
+	// perform the actual update
+	if err := dn.updateHypershift(&currentConfig, &desiredConfig, mcDiff); err != nil {
+		return errors.Wrapf(err, "Failed to update configuration")
+	}
+
+	// Finally, once we are successful, we reboot. At this point, two things can go wrong in the update:
+	// 1. The staged OS update isn't successful - in which case we roll back to previous OS deployment
+	// 2. Something the MCD modified gets overwritten during shutdown or boot
+	// Neither is fatal by itself. The first we would need to check upon reboot (we can likely do this
+	// in the controller via reading node status). The second we don't really have a way to check right
+	// now. Some options are to either run yet another pod upon reboot, or have a systemd service we add
+	// to the MCs to run and report status.
+
+	// write new config to disk, used for future updates
+	err = writeFileAtomicallyWithDefaults(currentConfigPath, desiredConfigBytes)
+	if err != nil {
+		return errors.Wrapf(err, "Cannot store new config to disk")
+	}
+
+	// Check for reboots
+	if ctrlcommon.InSlice(postConfigChangeActionReboot, actions) {
+		return dn.reboot(fmt.Sprintf("Node will reboot into config %s", desiredConfig.GetName))
+	}
+
+	if ctrlcommon.InSlice(postConfigChangeActionNone, actions) {
+		glog.Infof("No reboot needed for this update")
+	}
+
+	if ctrlcommon.InSlice(postConfigChangeActionReloadCrio, actions) {
+		serviceName := "crio"
+
+		if err := reloadService(serviceName); err != nil {
+			return fmt.Errorf("Could not apply update: reloading %s configuration failed. Error: %v", serviceName, err)
+		}
+
+		dn.logSystem("%s config reloaded successfully! Desired config %s has been applied, skipping reboot", serviceName, desiredConfig.GetName)
+	}
+
+	// TODO indicate our success here for Hypershift
+	glog.Infof("Hypershift update was successful. No reboot needed. Awaiting instructions")
 	return nil
 }
 
