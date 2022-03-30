@@ -335,6 +335,38 @@ func (dn *Daemon) ClusterConnect(
 	}
 }
 
+// HypershiftConnect sets up interface for Hypershift
+func (dn *Daemon) HypershiftConnect(nodeName string, kubeClient kubernetes.Interface, podName string) {
+	dn.name = nodeName
+	dn.kubeClient = kubeClient
+	dn.drainer = &drain.Helper{
+		Client:              dn.kubeClient,
+		Force:               true,
+		IgnoreAllDaemonSets: true,
+		DeleteEmptyDirData:  true,
+		GracePeriodSeconds:  -1,
+		Timeout:             90 * time.Second,
+		OnPodDeletedOrEvicted: func(pod *corev1.Pod, usingEviction bool) {
+			verbStr := "Deleted"
+			if usingEviction {
+				verbStr = "Evicted"
+			}
+			glog.Infof("%s pod %s/%s", verbStr, pod.Namespace, pod.Name)
+		},
+		AdditionalFilters: []drain.PodFilter{
+			func(pod corev1.Pod) drain.PodDeleteStatus {
+				if pod.Name == podName {
+					return drain.MakePodDeleteStatusSkip()
+				}
+				return drain.MakePodDeleteStatusOkay()
+			},
+		},
+		Out:    writer{glog.Info},
+		ErrOut: writer{glog.Error},
+		Ctx:    context.TODO(),
+	}
+}
+
 // writer implements io.Writer interface as a pass-through for klog.
 type writer struct {
 	logFunc func(args ...interface{})
@@ -551,6 +583,166 @@ func (dn *Daemon) detectEarlySSHAccessesFromBoot() error {
 			return err
 		}
 	}
+	return nil
+}
+
+// RunHypershift is the primary entrypoint for Hypershift
+func (dn *Daemon) RunHypershift(hypershiftConfigMap string) (retErr error) {
+	// First, get the current and desired configurations for the node
+	// current configuration will be read from on-disk state, either
+	//   a) /etc/machine-config-daemon/currentconfig, written by a previous hypershift-mode MCD
+	//   b) /etc/mcs-machine-config-content.json, written by MCS when the node is provisioned,
+	//      if no MCD has operated on this node
+	// desired configuration will be read directly off a ConfigMap in our namespace, specified by
+	// hypershiftConfigMap.
+
+	mcsServedConfigPath := "/etc/mcs-machine-config-content.json"
+
+	// TODO /etc/machine-config-daemon/currentconfig actually exists in hypershift nodes, but is empty.
+	// We should probably choose another location
+	currentConfigBytes, err := ioutil.ReadFile(currentConfigPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			currentConfigBytes, err = ioutil.ReadFile(mcsServedConfigPath)
+			if err != nil {
+				return errors.Wrapf(err, "Cannot find any existing configuration on disk")
+			}
+		} else {
+			return errors.Wrapf(err, "Failed to load local config")
+		}
+	}
+
+	var currentConfig mcfgv1.MachineConfig
+	err = json.Unmarshal(currentConfigBytes, &currentConfig)
+	if err != nil {
+		return errors.Wrapf(err, "Cannot read on-disk state into MachineConfig")
+	}
+	glog.Infof("Successfully read currentConfig")
+
+	// TODO get desired config
+	// The RBAC settings should allow us to read configmaps, so let's do that
+
+	// TODO May need to be variable
+	namespace := "hypershift-mco"
+	desiredConfigCM, err := dn.kubeClient.CoreV1().ConfigMaps(namespace).Get(context.TODO(), hypershiftConfigMap, metav1.GetOptions{})
+	if err != nil {
+		return errors.Wrapf(err, "Cannot fetch desiredConfig from configmap %s", hypershiftConfigMap)
+	}
+
+	// TODO probably have to compress this in the future
+	cmData := desiredConfigCM.Data["config"]
+	// glog.Infof("%s", cmData)
+	var desiredConfig mcfgv1.MachineConfig
+	err = json.Unmarshal([]byte(cmData), &desiredConfig)
+
+	if err != nil {
+		return errors.Wrapf(err, "Cannot decode desiredConfig from configmap data")
+	}
+
+	// glog.Infof("Update prep complete. CurrentConfig %s \n DesiredConfig %s", currentConfigBytes, desiredConfigBytes)
+
+	// check update reconcilability
+	mcDiff, err := reconcilable(&currentConfig, &desiredConfig)
+	glog.Infof("Update is ready. Diff: %v", mcDiff)
+	if err != nil {
+		return errors.Wrapf(err, "The update is not reconcilable")
+	}
+
+	glog.Infof("Update is reconcilable. Diff: %v", mcDiff)
+
+	// To match existing MCD behaviour, we will also need to drain, likely also needs to be configurable.
+	// Again, we can pass this in via a flag or env var.
+	// We will also need our own pod name such that we can craft a selector, to not drain ourselves.
+	// Note that the controller would need to uncordon the node after the update, likely after it has
+	// checked for update success (see below)
+
+	oldIgnConfig, err := ctrlcommon.ParseAndConvertConfig(currentConfig.Spec.Config.Raw)
+	if err != nil {
+		return fmt.Errorf("parsing old Ignition config failed: %w", err)
+	}
+	newIgnConfig, err := ctrlcommon.ParseAndConvertConfig(desiredConfig.Spec.Config.Raw)
+	if err != nil {
+		return fmt.Errorf("parsing new Ignition config failed: %w", err)
+	}
+	diffFileSet := ctrlcommon.CalculateConfigFileDiffs(&oldIgnConfig, &newIgnConfig)
+	actions, err := calculatePostConfigChangeAction(mcDiff, diffFileSet)
+	if err != nil {
+		return err
+	}
+	drain, err := isDrainRequired(actions, diffFileSet, oldIgnConfig, newIgnConfig)
+	if err != nil {
+		return err
+	}
+
+	glog.Infof("...Should be draining here %v", drain)
+
+	// For testing purposes, always drain
+	drain = true
+	if drain {
+		if dn.kubeClient == nil {
+			return errors.Wrapf(err, "Kubeclient is nil during update")
+		}
+
+		glog.Infof("Preparing to cordon")
+		node, err := dn.kubeClient.CoreV1().Nodes().Get(context.TODO(), dn.name, metav1.GetOptions{})
+		if err != nil {
+			return errors.Wrapf(err, "Cannot get node object")
+		}
+
+		// TODO the cordonOrUncordonNode still uses nodelister, so using a copy
+		dn.node = node
+		if err := dn.cordonOrUncordonNodeHypershift(true); err != nil {
+			return err
+		}
+
+		glog.Infof("Preparing to drain")
+		if err := dn.drain(); err != nil {
+			return err
+		}
+	} else {
+		glog.Info("Changes do not require drain, skipping.")
+	}
+
+	// perform the actual update
+	if err := dn.updateHypershift(&currentConfig, &desiredConfig, mcDiff); err != nil {
+		return errors.Wrapf(err, "Failed to update configuration")
+	}
+
+	// Finally, once we are successful, we reboot. At this point, two things can go wrong in the update:
+	// 1. The staged OS update isn't successful - in which case we roll back to previous OS deployment
+	// 2. Something the MCD modified gets overwritten during shutdown or boot
+	// Neither is fatal by itself. The first we would need to check upon reboot (we can likely do this
+	// in the controller via reading node status). The second we don't really have a way to check right
+	// now. Some options are to either run yet another pod upon reboot, or have a systemd service we add
+	// to the MCs to run and report status.
+
+	// write new config to disk, used for future updates
+	err = writeFileAtomicallyWithDefaults(currentConfigPath, []byte(cmData))
+	if err != nil {
+		return errors.Wrapf(err, "Cannot store new config to disk")
+	}
+
+	// Check for reboots
+	if ctrlcommon.InSlice(postConfigChangeActionReboot, actions) {
+		return dn.reboot(fmt.Sprintf("Node will reboot into config %s", desiredConfig.GetName))
+	}
+
+	if ctrlcommon.InSlice(postConfigChangeActionNone, actions) {
+		glog.Infof("No reboot needed for this update")
+	}
+
+	if ctrlcommon.InSlice(postConfigChangeActionReloadCrio, actions) {
+		serviceName := "crio"
+
+		if err := reloadService(serviceName); err != nil {
+			return fmt.Errorf("Could not apply update: reloading %s configuration failed. Error: %v", serviceName, err)
+		}
+
+		dn.logSystem("%s config reloaded successfully! Desired config %s has been applied, skipping reboot", serviceName, desiredConfig.GetName)
+	}
+
+	// TODO indicate our success here for Hypershift
+	glog.Infof("Hypershift update was successful. No reboot needed. Awaiting instructions")
 	return nil
 }
 

@@ -75,6 +75,41 @@ func (dn *Daemon) cordonOrUncordonNode(desired bool) error {
 	return nil
 }
 
+func (dn *Daemon) cordonOrUncordonNodeHypershift(desired bool) error {
+	verb := "cordon"
+	if !desired {
+		verb = "uncordon"
+	}
+
+	backoff := wait.Backoff{
+		Steps:    5,
+		Duration: 10 * time.Second,
+		Factor:   2,
+	}
+	var lastErr error
+	if err := wait.ExponentialBackoff(backoff, func() (bool, error) {
+		// Log has been added to ensure that MCO is correctly performing cordon/uncordon.
+		// This should help us with debugging bugs like https://bugzilla.redhat.com/show_bug.cgi?id=2022387
+		glog.Infof("Initiating %s on node (currently schedulable: %t)", verb, !dn.node.Spec.Unschedulable)
+		err := drain.RunCordonOrUncordon(dn.drainer, dn.node, desired)
+		if err != nil {
+			lastErr = err
+			glog.Infof("%s failed with: %v, retrying", verb, err)
+			return false, nil
+		}
+
+		glog.Infof("%s succeeded on node (currently schedulable: %t)", verb, desired)
+		return true, nil
+	}); err != nil {
+		if err == wait.ErrWaitTimeout {
+			return errors.Wrapf(lastErr, "failed to %s node (%d tries): %v", verb, backoff.Steps, err)
+		}
+		return errors.Wrapf(err, "failed to %s node", verb)
+	}
+
+	return nil
+}
+
 func (dn *Daemon) drain() error {
 	failedDrains := 0
 	done := make(chan bool, 1)

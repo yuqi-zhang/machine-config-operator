@@ -619,6 +619,110 @@ func (dn *Daemon) update(oldConfig, newConfig *mcfgv1.MachineConfig) (retErr err
 	return dn.performPostConfigChangeAction(actions, newConfig.GetName())
 }
 
+// This is currently a subsection copied over from update() since we need to be more nuanced. Should eventually
+// de-dupe the functions, but will wait until layering branch has settled a bit more there
+func (dn *Daemon) updateHypershift(oldConfig, newConfig *mcfgv1.MachineConfig, diff *machineConfigDiff) (retErr error) {
+	oldIgnConfig, err := ctrlcommon.ParseAndConvertConfig(oldConfig.Spec.Config.Raw)
+	if err != nil {
+		return fmt.Errorf("parsing old Ignition config failed: %w", err)
+	}
+	newIgnConfig, err := ctrlcommon.ParseAndConvertConfig(newConfig.Spec.Config.Raw)
+	if err != nil {
+		return fmt.Errorf("parsing new Ignition config failed: %w", err)
+	}
+
+	// update files on disk that need updating
+	if err := dn.updateFiles(oldIgnConfig, newIgnConfig); err != nil {
+		return err
+	}
+
+	defer func() {
+		if retErr != nil {
+			if err := dn.updateFiles(newIgnConfig, oldIgnConfig); err != nil {
+				retErr = errors.Wrapf(retErr, "error rolling back files writes %v", err)
+				return
+			}
+		}
+	}()
+
+	if err := dn.updateSSHKeys(newIgnConfig.Passwd.Users); err != nil {
+		return err
+	}
+
+	defer func() {
+		if retErr != nil {
+			if err := dn.updateSSHKeys(oldIgnConfig.Passwd.Users); err != nil {
+				retErr = errors.Wrapf(retErr, "error rolling back SSH keys updates %v", err)
+				return
+			}
+		}
+	}()
+
+	if dn.os.IsCoreOSVariant() {
+		// duplicated from OS Changes
+		var osImageContentDir string
+		if osImageContentDir, err = ExtractOSImage(newConfig.Spec.OSImageURL); err != nil {
+			return err
+		}
+		// Delete extracted OS image once we are done.
+		defer os.RemoveAll(osImageContentDir)
+
+		if err := addExtensionsRepo(osImageContentDir); err != nil {
+			return err
+		}
+		defer os.Remove(extensionsRepo)
+
+		coreOSDaemon := CoreOSDaemon{dn}
+		// Update OS
+		if diff.osUpdate {
+			if err := updateOS(newConfig, osImageContentDir); err != nil {
+				return err
+			}
+
+			defer func() {
+				// Operations performed by rpm-ostree on the booted system are available
+				// as staged deployment. It gets applied only when we reboot the system.
+				// In case of an error during any rpm-ostree transaction, removing pending deployment
+				// should be sufficient to discard any applied changes.
+				if retErr != nil {
+					// Print out the error now so that if we fail to cleanup -p, we don't lose it.
+					glog.Infof("Rolling back applied changes to OS due to error: %v", retErr)
+					if err := removePendingDeployment(); err != nil {
+						retErr = errors.Wrapf(retErr, "error removing staged deployment: %v", err)
+						return
+					}
+				}
+			}()
+		}
+
+		// Apply kargs
+		if err := coreOSDaemon.updateKernelArguments(oldConfig, newConfig); err != nil {
+			return err
+		}
+
+		// Switch to real time kernel
+		if err := coreOSDaemon.switchKernel(oldConfig, newConfig); err != nil {
+			return err
+		}
+
+		// Apply extensions
+		if err := coreOSDaemon.applyExtensions(oldConfig, newConfig); err != nil {
+			return err
+		}
+
+		tuningChanged, err := UpdateTuningArgs(KernelTuningFile, CmdLineFile)
+		if err != nil {
+			return err
+		}
+		if tuningChanged {
+			glog.Info("Updated kernel tuning arguments")
+		}
+	}
+
+	glog.Info("Successfully completed Hypershift config update")
+	return nil
+}
+
 // machineConfigDiff represents an ad-hoc difference between two MachineConfig objects.
 // At some point this may change into holding just the files/units that changed
 // and the MCO would just operate on that.  For now we're just doing this to get
