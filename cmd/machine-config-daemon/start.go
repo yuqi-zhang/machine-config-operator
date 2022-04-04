@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"flag"
+	"fmt"
 	"io"
 	"net/url"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"syscall"
 
 	"github.com/google/renameio"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/golang/glog"
@@ -35,6 +38,7 @@ var (
 		kubeconfig             string
 		nodeName               string
 		rootMount              string
+		desiredConfigmap       string
 		onceFrom               string
 		skipReboot             bool
 		fromIgnition           bool
@@ -49,6 +53,7 @@ func init() {
 	startCmd.PersistentFlags().StringVar(&startOpts.kubeconfig, "kubeconfig", "", "Kubeconfig file to access a remote cluster (testing only)")
 	startCmd.PersistentFlags().StringVar(&startOpts.nodeName, "node-name", "", "kubernetes node name daemon is managing.")
 	startCmd.PersistentFlags().StringVar(&startOpts.rootMount, "root-mount", "/rootfs", "where the nodes root filesystem is mounted for chroot and file manipulation.")
+	startCmd.PersistentFlags().StringVar(&startOpts.desiredConfigmap, "desired-configmap", "", "Runs the daemon for a Hypershift hosted cluster node. Requires a configmap with desired config as input.")
 	startCmd.PersistentFlags().StringVar(&startOpts.onceFrom, "once-from", "", "Runs the daemon once using a provided file path or URL endpoint as its machine config or ignition (.ign) file source")
 	startCmd.PersistentFlags().BoolVar(&startOpts.skipReboot, "skip-reboot", false, "Skips reboot after a sync, applies only in once-from")
 	startCmd.PersistentFlags().BoolVar(&startOpts.kubeletHealthzEnabled, "kubelet-healthz-enabled", true, "kubelet healthz endpoint monitoring")
@@ -187,6 +192,36 @@ func runStartCmd(cmd *cobra.Command, args []string) {
 	glog.Infof("overriding kubernetes api to %s", apiURL)
 	os.Setenv("KUBERNETES_SERVICE_HOST", url.Hostname())
 	os.Setenv("KUBERNETES_SERVICE_PORT", url.Port())
+
+	if startOpts.desiredConfigmap != "" {
+		// TODO: check if I can instead use the kubelet kubeconfig here, instead of the special namespaced client
+		config, err := rest.InClusterConfig()
+		if err != nil {
+			glog.Fatalf("Cannot create rest client: %v", err)
+		}
+		kubeClient, err := kubernetes.NewForConfig(config)
+		if err != nil {
+			glog.Fatalf("Cannot create clientset: %v", err)
+		}
+
+		dn.HypershiftConnect(startOpts.nodeName, kubeClient)
+		err = dn.RunFromConfigmap(startOpts.desiredConfigmap)
+		if err != nil {
+			// Set the node status to degraded and report error
+			// truncatedErr caps error message at a reasonable length to limit the risk of hitting the total
+			// annotation size limit (256 kb) at any point
+			truncatedErr := fmt.Sprintf("%.2000s", err.Error())
+			annos := map[string]string{
+				daemonconsts.MachineConfigDaemonStateAnnotationKey:  daemonconsts.MachineConfigDaemonStateDegraded,
+				daemonconsts.MachineConfigDaemonReasonAnnotationKey: truncatedErr,
+			}
+			if annoErr := dn.HypershiftSetAnnotation(annos); annoErr != nil {
+				err = fmt.Errorf("Error setting degraded annotation %v, original error %v", annoErr, err)
+			}
+			glog.Fatalf("%v", err)
+		}
+		return
+	}
 
 	cb, err := clients.NewBuilder(startOpts.kubeconfig)
 	if err != nil {
