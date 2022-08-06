@@ -1396,10 +1396,11 @@ func (dn *Daemon) completeUpdate(desiredConfigName string) error {
 	if err := dn.cordonOrUncordonNode(false); err != nil {
 		return err
 	}
-	dn.logSystem("Update completed for config %s and node has been successfully uncordoned", desiredConfigName)
-	dn.recorder.Eventf(getNodeRef(dn.node), corev1.EventTypeNormal, "Uncordon", fmt.Sprintf("Update completed for config %s and node has been uncordoned", desiredConfigName))
+	return fmt.Errorf("This is a test error. Expect this to always happen.")
+	// dn.logSystem("Update completed for config %s and node has been successfully uncordoned", desiredConfigName)
+	// dn.recorder.Eventf(getNodeRef(dn.node), corev1.EventTypeNormal, "Uncordon", fmt.Sprintf("Update completed for config %s and node has been uncordoned", desiredConfigName))
 
-	return nil
+	// return nil
 }
 
 // triggerUpdateWithMachineConfig starts the update. It queries the cluster for
