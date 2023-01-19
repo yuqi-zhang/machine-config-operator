@@ -491,6 +491,7 @@ func (ctrl *Controller) syncKubeletConfig(key string) error {
 
 	// Deep-copy otherwise we are mutating our cache.
 	cfg = cfg.DeepCopy()
+	return ctrl.syncStatusOnly(cfg, fmt.Errorf("TEST ERR"))
 
 	// Check for Deleted KubeletConfig and optionally delete finalizers
 	if cfg.DeletionTimestamp != nil {
