@@ -104,4 +104,8 @@ const (
 
 	// CRIOServiceName is used to specify reloads and restarts of the CRI-O service
 	CRIOServiceName = "crio"
+
+	// ImageRegistryDrainOverrideConfigmap is the name of the Configmap a user can apply to force all
+	// image registry changes to not drain
+	ImageRegistryDrainOverrideConfigmap = "image-registry-override-drain"
 )

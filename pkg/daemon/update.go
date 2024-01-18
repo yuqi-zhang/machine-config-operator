@@ -20,6 +20,7 @@ import (
 	"github.com/clarketm/json"
 	ign3types "github.com/coreos/ignition/v2/config/v3_4/types"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	kubeErrs "k8s.io/apimachinery/pkg/util/errors"
@@ -714,8 +715,16 @@ func (dn *Daemon) update(oldConfig, newConfig *mcfgv1.MachineConfig, skipCertifi
 		return err
 	}
 
+	crioOverrideConfigmapExists := false
+	_, err = dn.kubeClient.CoreV1().ConfigMaps(ctrlcommon.MCONamespace).Get(context.TODO(), constants.ImageRegistryDrainOverrideConfigmap, metav1.GetOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		klog.Errorf("Error fetching image registry drain override configmap: %w", err)
+	} else {
+		crioOverrideConfigmapExists = true
+	}
+
 	// Check and perform node drain if required
-	drain, err := isDrainRequired(actions, diffFileSet, oldIgnConfig, newIgnConfig)
+	drain, err := isDrainRequired(actions, diffFileSet, oldIgnConfig, newIgnConfig, crioOverrideConfigmapExists)
 	if err != nil {
 		return err
 	}
